@@ -1,7 +1,7 @@
 object Form1: TForm1
-  Left = 302
+  Left = 432
   Height = 400
-  Top = 109
+  Top = 115
   Width = 678
   Caption = 'Form1'
   ClientHeight = 400
@@ -27,7 +27,7 @@ object Form1: TForm1
     ParentColor = False
   end
   object Timer1: TTimer
-    Interval = 30
+    Interval = 100
     OnTimer = Timer1Timer
     Left = 567
   end

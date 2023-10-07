@@ -1,2 +1,4 @@
 # LazarusFPS
-First Person shooter engine in Lazarus (object pascal IDE built on FPC), porting from my pygame FPS prototype before I vectorize it all with numpy arrays.  Currently I'm using TCanvas.Rectangle and TCanvas.Pixel with a timer for the draw function but am in the process of optimising it by reimplementing it with scanlines and a mainloop. WIP!
+A simple trig based raycast implemented on a Scanline draw.
+Per-pixel rendering, I might change it to repeat each pixel once horizontally in order to save time; if it comes to that.
+Looks overly simplistic but once I add texture's the benefits of raycast will be more apparent.

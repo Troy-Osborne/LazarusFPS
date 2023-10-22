@@ -10,14 +10,20 @@ uses
 
 type
 
+Tvector2d = record
+  X,Y:real;
+end;
+
 Camera = record
 X,Y,Z,Azimuth,Inclination: Real;
 ViewWidth,ViewHeight:Real;
 HalfWidth,HalfHeight:Real;//Must be precomputed to prevent recalculating over and over
+Front,Right: Tvector2d;
 	end;
 
 Character = record
 Health,X,Y,Z,Azimuth,Inclination,Height: Real;
+Front,Right: Tvector2d;
 end;
 
 ByteCol = record
@@ -25,34 +31,56 @@ R,G,B,Null:Byte;
 end;
 
 
+//ByteRow = array of ByteCol;
+
+
+//Texture = record
+//width:ShortInt;
+//height:ShortInt;
+//Rows:array of ByteRow;
+//end;
+Texture = record
+width,height:Integer;
+Pixels:array of array of ByteCol;
+end;
+
+
+
   { TForm1 }
 
   TForm1 = class(TForm)
     FPSLabel: TLabel;
+    GrassTexImage: TImage;
+    HUD: TImage;
+    Minimap: TImage;
+    SkyBoxImage: TImage;
     Screen: TImage;
     Timer1: TTimer;
-    procedure ColorPickerRGBA1Click(Sender: TObject);
+    function BitmapToTexture(inputimage:TBitmap):Texture;
+
+
+function PixelToByteCol(incol:TColor):ByteCol;
+    function vector2d(X,Y:real):Tvector2d;
     procedure FormCreate(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure FormKeyUp(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure FormResize(Sender: TObject);
-    procedure Image1Click(Sender: TObject);
+    procedure HUDClick(Sender: TObject);
     procedure ResizeScreen;
-    procedure DrawSimpleScene(Cam:Camera);
-    procedure RaycastScene(Cam:Camera);
-    procedure ScanlineRaycast(Cam:Camera);
     procedure InitialiseCamera(X:real;Y:real;Z:real;Azimuth:real;Inclination:real);
     function HorizonHeight(Cam:Camera):integer;
-    procedure ScreenResize(Sender: TObject);
-    function Calculate_Ray(Cam:Camera;Azimuth:Real;Inclination:Real):TColor;
     function Calculate_ByteColRay(Cam:Camera;Azimuth:Real;Inclination:Real):ByteCol;
+    procedure SkyBoxImageClick(Sender: TObject);
     procedure Timer1Timer(Sender: TObject);
     procedure ScanlineDraw(Cam:Camera);
     function BlendCols(AR:integer;AG:integer;AB:integer;BR:integer;BG:integer;BB:integer;r:real):TColor;
     function BlendByteCols(AR:integer;AG:integer;AB:integer;BR:integer;BG:integer;BB:integer;r:real):ByteCol;
     procedure MovePlayer;
     procedure MoveCamera;
-
+    procedure CenterMouse;
+    procedure IniEngine;
+    procedure DrawMinimap;
+    function wrap(x:real;denominator:real):real;
 
   private
 
@@ -90,9 +118,19 @@ FogB:byte;
   lookingup:boolean;
   lookingdown:boolean;
 
+
   ///Efficient Drawing Vars
   xstep:real;
   ystep:real;
+  GrassTexture:Texture;
+  SkyTexture:Texture;
+
+
+  ///
+  MouseSensitivityX:Double;
+  MouseSensitivityY:Double;
+
+
 
 ////Implement ground as a list of layers of planes, where each plane has an associated rectangular boundary (objects and light can't collide with the plane outside the boundary)
 
@@ -101,6 +139,100 @@ implementation
 {$R *.lfm}
 
 { TForm1 }
+
+procedure TForm1.IniEngine;
+begin
+MouseSensitivityX:=0.01;
+MouseSensitivityY:=0.005;
+FogR:=8;   //set fog colour
+FogG:=0;
+FogB:=8;
+FogColour:=RGBToColor(FogR,FogG,FogB);
+frame:=0;
+PlayerHeight:=2;
+InitialiseCamera(0,2,0,0.3,0.15);
+ResizeScreen;
+//DrawSimpleScene(MainCamera);
+halfpi:=pi/2;
+tau:=pi*2;
+
+//LoadTextures
+GrassTexture:=BitmapToTexture(GrassTexImage.Picture.Bitmap);
+SkyTexture:=BitmapToTexture(SkyBoxImage.Picture.Bitmap);
+GrassTexImage.Destroy;
+SkyBoxImage.Destroy;
+
+//ScanlineDraw(MainCamera);
+xstep:=0.01;
+Timer1.Enabled:=True;
+end;
+
+function Tform1.wrap(x:real;denominator:real):real;
+begin
+if (x<denominator) and (x>0) then result:=x
+else if x <0 then result :=wrap(x+denominator,denominator)
+else result :=wrap(x-denominator,denominator)
+
+end;
+
+
+function TForm1.PixelToByteCol(incol:TColor):ByteCol;
+var
+outcol:bytecol;
+tempcol:TFPColor;
+  begin
+tempcol:=TColorToFPColor(incol);
+outcol.R:=tempcol.red;
+outcol.G:=tempcol.green;
+outcol.B:=tempcol.blue;
+outcol.Null:=0;
+result:=outcol
+  end;
+
+procedure TForm1.CenterMouse;
+begin
+Mouse.CursorPos:=Point(HalfWidth+Form1.Left,HalfHeight+Form1.Top);
+
+end;
+
+function TForm1.BitmapToTexture(inputimage:TBitmap):Texture;
+var
+  currentx:integer;
+  currenty:integer;
+  OutTex:texture;
+  tempcol:TFPColor;
+  tempBC:ByteCol;
+  temprow:Array of ByteCol;
+begin
+OutTex.width:=inputimage.width;
+OutTex.height:=inputimage.height;
+tempBC:=PixelToByteCol(clWhite);
+SetLength(OutTex.Pixels,inputimage.width);
+for currentx := 0 to OutTex.width-1 do begin
+     OutTex.Pixels[currentx]:=[TempBC];//init the array with a temp bytecol
+     SetLength(OutTex.Pixels[currentx],inputimage.height);//allocate memory needed for the row
+//     OutTex.Rows[0].Pixels:= Array[0..OutTex.height-1] of ByteCol;
+//     system.SetLength(OutTex.Rows[0].Pixels,OutTex.width);
+//     OutTex.Rows[currentrow]:=[tempBC];
+       for currenty := 0 to OutTex.height-1 do begin
+           OutTex.Pixels[currentx][currenty]:=PixelToByteCol(inputimage.Canvas.Pixels[currentx,currenty]);
+
+//         temprow.length:=OutTex.width;
+//          tempcol:=TColorToFPColor(inputimage.Canvas.Pixels[currentpixel,currentrow]);
+//          tempBC.R:=tempcol.Red;
+//          tempBC.G:=tempcol.Green;
+//         tempBC.B:=tempcol.Blue;
+//          temprow.Pixels[currentpixel]:=tempBC;
+          end;
+
+ end;
+result:=OutTex;
+end;
+
+
+
+
+
 function TForm1.BlendCols(AR:integer;AG:integer;AB:integer;BR:integer;BG:integer;BB:integer;r:real):TColor;
 begin
      result:=RGBToColor(round(AR*r+BR*(1-r)),round(AG*r+BG*(1-r)),round(AB*r+BB*(1-r)));
@@ -122,12 +254,6 @@ ScanLineImage: TLazIntfImage;
 y: Integer;
 ImgFormatDescription: TRawImageDescription;
 begin
-     ////////FROM SCANLINE EXAMPLE.
-//  MyBitmap:=TBitmap.Create;
-
-  // create an image with a format similar to Delphi's pf32bit
-  // keep in mind that you access it in bytes, not words or dwords
-  // For example PowerPC uses another byte order (endian big)
   ScanLineImage:=TLazIntfImage.Create(0,0);
   ImgFormatDescription.Init_BPP32_B8G8R8_BIO_TTB(Screen.Width,Screen.Height);
   ScanLineImage.DataDescription:=ImgFormatDescription;
@@ -139,14 +265,9 @@ begin
                             MainCamera);
 
   // create IntfImage with the format of the current LCL interface
-//  MyBitmap.Width:=ScanLineImage.Width;
-//  MyBitmap.Height:=ScanLineImage.Height;
-//  IntfImage:=MyBitmap.CreateIntfImage;
    IntfImage:=Screen.Picture.Bitmap.CreateIntfImage;
-  // convert the content from the very specific to the current format
   IntfImage.CopyPixels(ScanLineImage);
   Screen.Picture.Bitmap.LoadFromIntfImage(IntfImage);
-//Screen.Picture.Bitmap:=MyBitmap;
   ScanLineImage.Free;
   IntfImage.Free;
 end;
@@ -158,12 +279,22 @@ MainCamera.Y:=Y;
 MainCamera.Z:=Z;
 MainCamera.Azimuth:=Azimuth;
 MainCamera.Inclination:=Inclination;
-MainCamera.ViewWidth:=0.8;
-MainCamera.ViewHeight:=0.6;
-MainCamera.HalfWidth:=0.4;
-MainCamera.HalfHeight:=0.3;
+MainCamera.ViewWidth:=0.6;
+MainCamera.ViewHeight:=1;
+MainCamera.HalfWidth:=0.3;
+MainCamera.HalfHeight:=0.5;
+MainCamera.Front:=vector2d(cos(Azimuth),sin(Azimuth));
+MainCamera.Right:=vector2d(cos(Azimuth+halfpi),sin(Azimuth+halfpi));
 end;
 
+function Tform1.Vector2d(X,Y:real):Tvector2d;
+var
+outvector:Tvector2d;
+begin
+outvector.X:=X;
+outvector.Y:=Y;
+result:=outvector;
+end;
 
 procedure TForm1.PaintToRGB32bitScanLine(Row, ImgWidth,ImgHeight: integer;
   LineStart: Pointer; Cam:Camera );
@@ -171,22 +302,23 @@ procedure TForm1.PaintToRGB32bitScanLine(Row, ImgWidth,ImgHeight: integer;
 // 4 bytes per pixel. First byte is blue, second green, third is red.
 // Black is 0,0,0, white is 255,255,255
 var
-  i: Integer;
-  datalen:integer;
-inclination:real;
-azimuth:real;
-xr,yr:real;
-cellcol:ByteCol;
-azstep:real;
+   i: Integer;
+   datalen:integer;
+   inclination:real;
+   azimuth:real;
+   xr,yr:real;
+   cellcol:ByteCol;
+   azstep:real;
 begin
 i:=0;
 datalen:= (ImgWidth*4)-1;
-xr:=-1;yr:=(row/HalfHeight-1);
-azimuth:=Cam.Azimuth+xr*Cam.HalfWidth;
-azstep:=xstep*Cam.HalfWidth;
+yr:=(row/HalfHeight-1);
+azimuth:=Cam.Azimuth-Cam.HalfWidth;
+azstep:=Cam.ViewWidth/ImgWidth;
 inclination:=cam.inclination+yr*Cam.HalfHeight;
 while (i<datalen) do begin
-xr:=xr+xstep;
+//xr:=xr+xstep;
+azimuth:=azimuth+azstep;
 cellcol:= Calculate_ByteColRay(Cam,azimuth,inclination);
 PByte(LineStart)[i]:=cellcol.B;  Inc(i);
 PByte(LineStart)[i]:=cellcol.G; Inc(i);
@@ -200,48 +332,49 @@ begin
 result:=HalfHeight-round(Cam.Inclination/MainCamera.HalfHeight*HalfHeight) //horizon below centre
 end;
 
-procedure TForm1.ScreenResize(Sender: TObject);
-begin
- // Screen.Picture:=TPicture.Create;
- //   Screen.Picture.Bitmap.Width:=Screen.Width;
- //   Screen.Picture.Bitmap.Height:=Screen.Height;
-end;
 
 procedure TForm1.MoveCamera;
 begin
-MainCamera.Azimuth:=MainCamera.Azimuth+(HalfWidth-Mouse.CursorPos.X)*0.001;
-MainCamera.Inclination:=MainCamera.Inclination+(HalfHeight-Mouse.CursorPos.Y)*0.001;
+MainCamera.Azimuth:=MainCamera.Azimuth-(HalfWidth-(Mouse.CursorPos.X-Form1.Left))*MouseSensitivityX;
+MainCamera.Inclination:=MainCamera.Inclination+(HalfHeight-(Mouse.CursorPos.Y-Form1.Top))*MouseSensitivityY;
 
 if MainCamera.Azimuth>pi then MainCamera.Azimuth:=MainCamera.Azimuth-pi*2;
-if MainCamera.Inclination<-pi*0.8 then MainCamera.Inclination:=-pi*0.8;
+if MainCamera.Inclination<-pi*0.25 then MainCamera.Inclination:=-pi*0.25;
 
 if MainCamera.Azimuth<-pi then MainCamera.Azimuth:=MainCamera.Azimuth+pi*2;
-if MainCamera.Inclination>pi*0.8 then MainCamera.Inclination:=pi*0.8;
-//Mouse.CursorPos.SetLocation(HalfWidth,HalfHeight);
-//Mouse.CursorPos.Y:=HalfHeight;
+if MainCamera.Inclination>pi*0.25 then MainCamera.Inclination:=pi*0.25;
+CenterMouse;
+MainCamera.Front:=vector2d(cos(MainCamera.Azimuth),sin(MainCamera.Azimuth));
+MainCamera.Right:=vector2d(cos(MainCamera.Azimuth+halfpi),sin(MainCamera.Azimuth+halfpi));
 end;
 
 procedure TForm1.MovePlayer;
+
+var
+     movespeed:real;
 begin
-    ///for now just move camera, eventually it will move player and there will be two cameras, one in front of player, and one that trails player third person
+movespeed:=0.2;
+//2dvector type has attributes named X&Y but here the Y attribute represents the Z axis since we don't walk into the sky
+
+///for now just move camera, eventually it will move player and there will be two cameras, one in front of player, and one that trails player third person
 if movingforward=True then
 begin
-   MainCamera.X:=MainCamera.X+cos(MainCamera.Azimuth)*0.1;
-   MainCamera.Z:=MainCamera.Z+sin(MainCamera.Azimuth)*0.1;
+   MainCamera.X:=MainCamera.X+MainCamera.Front.X*movespeed;
+   MainCamera.Z:=MainCamera.Z+MainCamera.Front.Y*movespeed;
 end
 else if movingbackward=True then begin
-   MainCamera.X:=MainCamera.X-cos(MainCamera.Azimuth)*0.1;
-   MainCamera.Z:=MainCamera.Z-sin(MainCamera.Azimuth)*0.1
+   MainCamera.X:=MainCamera.X-MainCamera.Front.X*movespeed;
+   MainCamera.Z:=MainCamera.Z-MainCamera.Front.Y*movespeed;
 end;
 
 //check for strafing, ignoring it if player is trying to strafe left and right at once
-if (leftstrafe=True and rightstrafe=False) then begin
-   MainCamera.X:=MainCamera.X+cos(MainCamera.Azimuth+halfpi)*0.1;
-   MainCamera.Z:=MainCamera.Z+sin(MainCamera.Azimuth+halfpi)*0.1
+if (leftstrafe=True) and (rightstrafe=False) then begin
+   MainCamera.X:=MainCamera.X-MainCamera.Right.X*movespeed;
+   MainCamera.Z:=MainCamera.Z-MainCamera.Right.Y*movespeed;
 end
-else if (rightstrafe=True and leftStrafe=False)then begin
-   MainCamera.X:=MainCamera.X+cos(MainCamera.Azimuth-halfpi)*0.1;
-   MainCamera.Z:=MainCamera.Z+sin(MainCamera.Azimuth-halfpi)*0.1
+else if (rightstrafe=True) and (leftStrafe=False)then begin
+   MainCamera.X:=MainCamera.X+MainCamera.Right.X*movespeed;
+   MainCamera.Z:=MainCamera.Z+MainCamera.Right.Y*movespeed;
 end
 
 
@@ -249,28 +382,18 @@ end;
 
 procedure TForm1.FormCreate(Sender: TObject);
 begin
-FogR:=128;
-FogG:=128;
-FogB:=128;
-FogColour:=RGBToColor(FogR,FogG,FogB);
-frame:=0;
-PlayerHeight:=2;
-InitialiseCamera(0,2,0,0.3,0.15);
-ResizeScreen;
-//DrawSimpleScene(MainCamera);
-halfpi:=pi/2;
-tau:=pi*2;
-ScanlineDraw(MainCamera);
+IniEngine;
 end;
 
 procedure TForm1.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState
   );
 begin
 
-if Key=87 then movingforward:=True;
-if Key=83 then movingbackward:=True;
-if Key=65 then leftstrafe:=True;
-if Key=68 then rightstrafe:=True;
+if Key=87 then movingforward:=True
+else if Key=83 then movingbackward:=True;
+
+if Key=65 then leftstrafe:=True
+else if Key=68 then rightstrafe:=True;
 
 
 end;
@@ -285,25 +408,6 @@ if Key=68 then rightstrafe:=False;
 
 end;
 
-function TForm1.Calculate_Ray(Cam:Camera;Azimuth:Real;Inclination:Real):TColor;
-var
-  raylength:real;
-  heightdifference:real;
-  YintersectX:real;
-    YintersectZ:real;
-begin
-heightdifference:=Cam.Y+PlayerHeight;//How far the camera is from the plane
-raylength:=sqrt(sqr(heightdifference/math.tan(inclination))+sqr(heightdifference));
-YintersectX:=Cam.X+cos(Azimuth)*raylength;
-YintersectZ:=Cam.Z+sin(Azimuth)*raylength;
-if inclination=0 then
-result:=FogColour
-else if inclination <0  then
-   result:=BlendCols(0,255,0,FogR,FogG,FogB,(1-ArcTan(raylength/5)/halfpi))
-else
-result:=BlendCols(100,160,220,FogR,FogG,FogB,(1-ArcTan(raylength/5)/halfpi));
-end;
-
 
 function TForm1.Calculate_ByteColRay(Cam:Camera;Azimuth:Real;Inclination:Real):ByteCol;
 var
@@ -312,41 +416,43 @@ var
   YintersectX:real;
     YintersectZ:real;
     outcol:ByteCol;
+   texcol:ByteCol;
 begin
-heightdifference:=2;//Cam.Y+PlayerHeight;//How far the camera is from the plane
+heightdifference:=2;//Cam.Y+PlayerHeight;//How far the camera is from the Ground
 if not(inclination=0) then begin
 raylength:=sqrt(sqr(heightdifference/math.tan(inclination))+sqr(heightdifference));
 YintersectX:=Cam.X+cos(Azimuth)*raylength;
 YintersectZ:=Cam.Z+sin(Azimuth)*raylength;
 end;
 
-if abs(inclination)<0.05 then begin
+if abs(inclination)<0.03 then begin
 outcol.R:=FogR;
 outcol.G:=FogG;
 outcol.B:=FogB;
 result:=outcol;
 end
-else if inclination <0  then
-   result:=BlendByteCols(0,255,0,FogR,FogG,FogB,(1-ArcTan(raylength/5)/halfpi))
-else
-result:=BlendByteCols(100,160,220,FogR,FogG,FogB,(1-ArcTan(raylength/5)/halfpi));
+else if inclination <0  then  begin
+   texcol:=GrassTexture.Pixels[floor(wrap(YintersectX*250,GrassTexture.width))][floor(wrap(YintersectZ*250,GrassTexture.height))];
+   result:=BlendByteCols(texcol.R,texcol.G,texcol.B,FogR,FogG,FogB,(1-ArcTan(raylength/2)/halfpi))
+end
+else begin
+texcol:=SkyTexture.Pixels[floor(wrap(azimuth,tau)/tau*SkyTexture.width)][floor(wrap(inclination,tau)/tau*SkyTexture.height)];
+result:=BlendByteCols(texcol.R,texcol.G,texcol.B,FogR,FogG,FogB,(1-ArcTan(raylength/2)/halfpi));
+end
+end;
+
+procedure TForm1.SkyBoxImageClick(Sender: TObject);
+begin
+
 end;
 
 procedure TForm1.Timer1Timer(Sender: TObject);
 begin
   MovePlayer;
   MoveCamera;
-FPSLabel.caption:= inttostr(frame)+'  '+FloatToStr(MainCamera.inclination);
+FPSLabel.caption:= inttostr(frame)+'  '+FloatToStr(MainCamera.inclination)+' , '+FloatToStr(MainCamera.azimuth)+' Direction: ('+floattostr(MainCamera.Front.X)+', '+floattostr(MainCamera.Front.Y)+')';
   frame:=frame+1;
-
-//  DrawSimpleScene(MainCamera);
-//RaycastScene(MainCamera);
 ScanlineDraw(MainCamera);
-end;
-
-procedure TForm1.ColorPickerRGBA1Click(Sender: TObject);
-begin
-
 end;
 
 procedure TForm1.FormResize(Sender: TObject);
@@ -355,65 +461,15 @@ begin
 
 end;
 
-procedure TForm1.Image1Click(Sender: TObject);
+procedure TForm1.DrawMinimap;
+begin
+     Minimap.Canvas.Ellipse(96,94,100,98);
+
+end;
+
+procedure TForm1.HUDClick(Sender: TObject);
 begin
   ShowMessage('testing');
-
-end;
-
-procedure TForm1.RaycastScene(Cam:Camera);
-var
-    az,inc:real;
-    scale:integer;
-    i,j:integer;
-    x,y:integer;
-begin
-scale:=6;//cells are 2x2
-for j:= 0 to (Screen.Height div scale) do begin
-     y:=Screen.Height-j*scale;
-     inc:=Cam.Inclination+((j*scale)/HalfHeight-1)*Cam.HalfHeight;
-     for i:= 0 to (Screen.Width div scale) do begin
-            az:=Cam.Azimuth+((i*scale)/HalfWidth-1)*Cam.HalfWidth;
-            x:=i*scale;
-                Screen.Canvas.Brush.Color:=Calculate_Ray(Cam,az,inc);
-                Screen.Canvas.FillRect(x,y,x+scale,y+scale);
-          end;
-       end;
-end;
-
-procedure TForm1.ScanlineRaycast(Cam:Camera);  /////////WORK HERE
-begin
-
-end;
-
-procedure TForm1.DrawSimpleScene(Cam:Camera);
-var
-     Middle:integer;
-begin
-     //calculate horizon_line
-     Middle:=HorizonHeight(MainCamera);
-     //draw horizon_line
-     if Middle<0 then //ground only
-             begin
-                  Screen.Canvas.Brush.Color:=clGreen;
-                  Screen.Canvas.FillRect(0,0,Screen.Width,Screen.Height);
-             end
-     else if Middle>=Screen.Height then
-             begin
-                Screen.Canvas.Brush.Color:=clBlue;
-                Screen.Canvas.FillRect(0,0,Screen.Width,Screen.Height);
-             end
-     else
-     begin
-          Screen.Canvas.Brush.Color:=clBlue;
-          Screen.Canvas.FillRect(0,0,Screen.Width,Middle);
-          Screen.Canvas.Brush.Color:=clGreen;
-          Screen.Canvas.FillRect(0,middle,Screen.Width,Screen.Height);
-          Screen.Canvas.Pen.Color:=clWhite;
-          Screen.Canvas.Line(0,Middle,Screen.Width,Middle);
-     end;
-
-
 
 end;
 
@@ -421,7 +477,7 @@ procedure TForm1.ResizeScreen;
 begin
 
      Screen.Width:=Form1.Width-2;
-     Screen.Height:=Form1.Height-16;
+     Screen.Height:=Form1.Height-120;
      HalfHeight:=Screen.Height div 2;
      HalfWidth:=Screen.Width div 2;
      xstep:=2/Screen.Width;
@@ -429,6 +485,7 @@ begin
      Screen.Picture:=TPicture.Create;
   Screen.Picture.Bitmap.Width:=Screen.Width;
    Screen.Picture.Bitmap.Height:=Screen.Height;
+   HUD.Top:=Form1.Height-120;
 end;
 
 end.

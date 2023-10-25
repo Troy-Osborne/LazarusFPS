@@ -7,6 +7,7 @@ interface
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, ExtCtrls, StdCtrls,
   FPImage, GraphType, GR32_Image, math, GR32_ColorPicker, IntfGraphics;
+//Some of these are from legacy versions, and no longer used, will be cleaned soon.
 
 type
 
@@ -17,28 +18,29 @@ end;
 Camera = record
 X,Y,Z,Azimuth,Inclination: Real;
 ViewWidth,ViewHeight:Real;
-HalfWidth,HalfHeight:Real;//Must be precomputed to prevent recalculating over and over
+HalfWidth,HalfHeight:Real;//Must be precomputed to prevent recalculating over and over each frame
 Front,Right: Tvector2d;
 	end;
 
 Character = record
 Health,X,Y,Z,Azimuth,Inclination,Height: Real;
+POV:Camera;
 Front,Right: Tvector2d;
+crouching:boolean;
+jumping:boolean;
+movingforward:boolean;
+movingbackward:boolean;
+leftstrafe:boolean;
+rightstrafe:boolean;
+InAir:boolean;
+jumpvelocity:real;
+
 end;
 
 ByteCol = record
 R,G,B,Null:Byte;
 end;
 
-
-//ByteRow = array of ByteCol;
-
-
-//Texture = record
-//width:ShortInt;
-//height:ShortInt;
-//Rows:array of ByteRow;
-//end;
 Texture = record
 width,height:Integer;
 Pixels:array of array of ByteCol;
@@ -76,10 +78,13 @@ function PixelToByteCol(incol:TColor):ByteCol;
     function BlendCols(AR:integer;AG:integer;AB:integer;BR:integer;BG:integer;BB:integer;r:real):TColor;
     function BlendByteCols(AR:integer;AG:integer;AB:integer;BR:integer;BG:integer;BB:integer;r:real):ByteCol;
     procedure MovePlayer;
-    procedure MoveCamera;
+    procedure UpdateView;
     procedure CenterMouse;
     procedure IniEngine;
+    procedure IniPlayer;
     procedure DrawMinimap;
+    procedure UpdatePOV;
+    function FogLevel(distance:real):real;
     function wrap(x:real;denominator:real):real;
 
   private
@@ -96,27 +101,13 @@ FogR:byte;
 FogG:byte;
 FogB:byte;
   Form1: TForm1;
-  PlayerX: real;
-  PlayerY: real;
-  PlayerZ: real;
-  PlayerHeight:real;
   halfpi,tau:real;
-  PlayerAzimuth:real;
-  PlayerInclination:real;
-  MainCamera:Camera;
   HalfWidth:integer;
   HalfHeight:integer;
   frame:integer;
-  movingforward:boolean;
-  movingbackward:boolean;
-  leftstrafe:boolean;
-  rightstrafe:boolean;
-  crouching:boolean;
-  jumping:boolean;
-  lookingleft:boolean;
-  lookingright:boolean;
-  lookingup:boolean;
-  lookingdown:boolean;
+  SinglePlayer:Character;
+  AmbientLight:real;//from 0 to 1
+  FogThickness:real;//from 0 to 1
 
 
   ///Efficient Drawing Vars
@@ -126,19 +117,43 @@ FogB:byte;
   SkyTexture:Texture;
 
 
-  ///
+  //Mouse Movement
   MouseSensitivityX:Double;
   MouseSensitivityY:Double;
 
 
 
-////Implement ground as a list of layers of planes, where each plane has an associated rectangular boundary (objects and light can't collide with the plane outside the boundary)
+////Implement ground as a list of layers of planes,
+//where each plane has an associated rectangular boundary 
+//So objects and light can't collide with the plane outside the boundary
+//This will allow for multiple heights in the terrain
 
 implementation
 
 {$R *.lfm}
 
 { TForm1 }
+
+procedure TForm1.IniPlayer;
+begin
+SinglePlayer.crouching:=False;
+SinglePlayer.jumping:=False;
+SinglePlayer.leftstrafe:=False;
+SinglePlayer.rightstrafe:=False;
+SinglePlayer.movingbackward:=False;
+SinglePlayer.movingforward:=False;
+SinglePlayer.jumping:=False;
+SinglePlayer.crouching:=False;
+SinglePlayer.Azimuth:=0;
+SinglePlayer.Inclination:=0;
+SinglePlayer.Health:=100;
+SinglePlayer.Height:=2;
+SinglePlayer.X:=0;
+SinglePlayer.Y:=0;
+SinglePlayer.Z:=0;
+SinglePlayer.InAir:=False;
+SinglePlayer.jumpvelocity:=0;
+end;
 
 procedure TForm1.IniEngine;
 begin
@@ -147,12 +162,13 @@ MouseSensitivityY:=0.005;
 FogR:=8;   //set fog colour
 FogG:=0;
 FogB:=8;
+AmbientLight:=0.2;
+FogThickness:=0.5;
 FogColour:=RGBToColor(FogR,FogG,FogB);
 frame:=0;
-PlayerHeight:=2;
-InitialiseCamera(0,2,0,0.3,0.15);
+InitialiseCamera(0,0,0,0.3,0.15);
 ResizeScreen;
-//DrawSimpleScene(MainCamera);
+//DrawSimpleScene(SinglePlayer);
 halfpi:=pi/2;
 tau:=pi*2;
 
@@ -162,12 +178,12 @@ SkyTexture:=BitmapToTexture(SkyBoxImage.Picture.Bitmap);
 GrassTexImage.Destroy;
 SkyBoxImage.Destroy;
 
-//ScanlineDraw(MainCamera);
+//ScanlineDraw(SinglePlayer);
 xstep:=0.01;
 Timer1.Enabled:=True;
 end;
 
-function Tform1.wrap(x:real;denominator:real):real;
+function Tform1.wrap(x:real;denominator:real):real; //An alternative to mod which always returns a positive number to ensure textures are tiled correctly
 begin
 if (x<denominator) and (x>0) then result:=x
 else if x <0 then result :=wrap(x+denominator,denominator)
@@ -191,7 +207,14 @@ result:=outcol
 
 procedure TForm1.CenterMouse;
 begin
+//Return the mouse to the center of the screen
 Mouse.CursorPos:=Point(HalfWidth+Form1.Left,HalfHeight+Form1.Top);
+end;
+
+function FogLevel(distance:real):real;
+begin
+//This will be updated to depend on fog thickness and ambient light, for the time being fog thickness is constant depending only on the distance of the rendered point
+result:= 1-ArcTan(raylength/2)/halfpi;
 
 end;
 
@@ -207,22 +230,13 @@ begin
 OutTex.width:=inputimage.width;
 OutTex.height:=inputimage.height;
 tempBC:=PixelToByteCol(clWhite);
-SetLength(OutTex.Pixels,inputimage.width);
+SetLength(OutTex.Pixels,inputimage.width); //Allocate the number of columns (array of bytecol) which appear in the texture
 for currentx := 0 to OutTex.width-1 do begin
      OutTex.Pixels[currentx]:=[TempBC];//init the array with a temp bytecol
      SetLength(OutTex.Pixels[currentx],inputimage.height);//allocate memory needed for the row
-//     OutTex.Rows[0].Pixels:= Array[0..OutTex.height-1] of ByteCol;
-//     system.SetLength(OutTex.Rows[0].Pixels,OutTex.width);
-//     OutTex.Rows[currentrow]:=[tempBC];
        for currenty := 0 to OutTex.height-1 do begin
+//copy pixels from the TBitmap.Canvas into the Texture type's 2d array of ByteCols (A custom record)
            OutTex.Pixels[currentx][currenty]:=PixelToByteCol(inputimage.Canvas.Pixels[currentx,currenty]);
-
-//         temprow.length:=OutTex.width;
-//          tempcol:=TColorToFPColor(inputimage.Canvas.Pixels[currentpixel,currentrow]);
-//          tempBC.R:=tempcol.Red;
-//          tempBC.G:=tempcol.Green;
-//         tempBC.B:=tempcol.Blue;
-//          temprow.Pixels[currentpixel]:=tempBC;
           end;
 
  end;
@@ -230,13 +244,13 @@ result:=OutTex;
 end;
 
 
-
-
-
 function TForm1.BlendCols(AR:integer;AG:integer;AB:integer;BR:integer;BG:integer;BB:integer;r:real):TColor;
 begin
+//Legacy Version which outputs a TColor, no longer used.
+//See BlendByteCols below for the current version
      result:=RGBToColor(round(AR*r+BR*(1-r)),round(AG*r+BG*(1-r)),round(AB*r+BB*(1-r)));
 end;
+
 function TForm1.BlendByteCols(AR:integer;AG:integer;AB:integer;BR:integer;BG:integer;BB:integer;r:real):ByteCol;
 var
   outcol:ByteCol;
@@ -262,7 +276,7 @@ begin
   for y:=1 to ScanLineImage.Height do
     PaintToRGB32bitScanLine(ScanLineImage.Height-y,ScanLineImage.Width,ScanLineImage.Height,
                             ScanLineImage.GetDataLineStart(y-1),
-                            MainCamera);
+                            SinglePlayer.POV);
 
   // create IntfImage with the format of the current LCL interface
    IntfImage:=Screen.Picture.Bitmap.CreateIntfImage;
@@ -274,17 +288,17 @@ end;
 
 procedure TForm1.InitialiseCamera(X:real;Y:real;Z:real;Azimuth:real;Inclination:real);
 begin
-MainCamera.X:=X;
-MainCamera.Y:=Y;
-MainCamera.Z:=Z;
-MainCamera.Azimuth:=Azimuth;
-MainCamera.Inclination:=Inclination;
-MainCamera.ViewWidth:=0.6;
-MainCamera.ViewHeight:=1;
-MainCamera.HalfWidth:=0.3;
-MainCamera.HalfHeight:=0.5;
-MainCamera.Front:=vector2d(cos(Azimuth),sin(Azimuth));
-MainCamera.Right:=vector2d(cos(Azimuth+halfpi),sin(Azimuth+halfpi));
+SinglePlayer.POV.X:=X;
+SinglePlayer.POV.Y:=Y;
+SinglePlayer.POV.Z:=Z;
+SinglePlayer.POV.Azimuth:=Azimuth;
+SinglePlayer.POV.Inclination:=Inclination;
+SinglePlayer.POV.ViewWidth:=0.6;
+SinglePlayer.POV.ViewHeight:=1;
+SinglePlayer.POV.HalfWidth:=0.3;
+SinglePlayer.POV.HalfHeight:=0.5;
+SinglePlayer.POV.Front:=vector2d(cos(Azimuth),sin(Azimuth));
+SinglePlayer.POV.Right:=vector2d(cos(Azimuth+halfpi),sin(Azimuth+halfpi));
 end;
 
 function Tform1.Vector2d(X,Y:real):Tvector2d;
@@ -317,7 +331,6 @@ azimuth:=Cam.Azimuth-Cam.HalfWidth;
 azstep:=Cam.ViewWidth/ImgWidth;
 inclination:=cam.inclination+yr*Cam.HalfHeight;
 while (i<datalen) do begin
-//xr:=xr+xstep;
 azimuth:=azimuth+azstep;
 cellcol:= Calculate_ByteColRay(Cam,azimuth,inclination);
 PByte(LineStart)[i]:=cellcol.B;  Inc(i);
@@ -329,23 +342,34 @@ end;
 
 function TForm1.HorizonHeight(Cam:Camera):integer;
 begin
-result:=HalfHeight-round(Cam.Inclination/MainCamera.HalfHeight*HalfHeight) //horizon below centre
+result:=HalfHeight-round(Cam.Inclination/Cam.HalfHeight*HalfHeight) //horizon below centre
 end;
 
 
-procedure TForm1.MoveCamera;
+procedure TForm1.UpdateView;
 begin
-MainCamera.Azimuth:=MainCamera.Azimuth-(HalfWidth-(Mouse.CursorPos.X-Form1.Left))*MouseSensitivityX;
-MainCamera.Inclination:=MainCamera.Inclination+(HalfHeight-(Mouse.CursorPos.Y-Form1.Top))*MouseSensitivityY;
+SinglePlayer.Azimuth:=SinglePlayer.Azimuth-(HalfWidth-(Mouse.CursorPos.X-Form1.Left))*MouseSensitivityX;
+SinglePlayer.Inclination:=SinglePlayer.Inclination+(HalfHeight-(Mouse.CursorPos.Y-Form1.Top))*MouseSensitivityY;
 
-if MainCamera.Azimuth>pi then MainCamera.Azimuth:=MainCamera.Azimuth-pi*2;
-if MainCamera.Inclination<-pi*0.25 then MainCamera.Inclination:=-pi*0.25;
+if SinglePlayer.Azimuth>pi then SinglePlayer.Azimuth:=SinglePlayer.Azimuth-pi*2;
+if SinglePlayer.Inclination<-pi*0.25 then SinglePlayer.Inclination:=-pi*0.25;
 
-if MainCamera.Azimuth<-pi then MainCamera.Azimuth:=MainCamera.Azimuth+pi*2;
-if MainCamera.Inclination>pi*0.25 then MainCamera.Inclination:=pi*0.25;
+if SinglePlayer.Azimuth<-pi then SinglePlayer.Azimuth:=SinglePlayer.Azimuth+pi*2;
+if SinglePlayer.Inclination>pi*0.25 then SinglePlayer.Inclination:=pi*0.25;
 CenterMouse;
-MainCamera.Front:=vector2d(cos(MainCamera.Azimuth),sin(MainCamera.Azimuth));
-MainCamera.Right:=vector2d(cos(MainCamera.Azimuth+halfpi),sin(MainCamera.Azimuth+halfpi));
+SinglePlayer.Front:=vector2d(cos(SinglePlayer.Azimuth),sin(SinglePlayer.Azimuth));
+SinglePlayer.Right:=vector2d(cos(SinglePlayer.Azimuth+halfpi),sin(SinglePlayer.Azimuth+halfpi));
+UpdatePOV;
+
+end;
+
+procedure TForm1.UpdatePOV;
+begin
+//Update POV Cam
+SinglePlayer.POV.Azimuth:=SinglePlayer.Azimuth;
+SinglePlayer.POV.Inclination:=SinglePlayer.Inclination;
+SinglePlayer.POV.Front:=SinglePlayer.Front;
+SinglePlayer.POV.Right:=SinglePlayer.Right;
 end;
 
 procedure TForm1.MovePlayer;
@@ -354,56 +378,87 @@ var
      movespeed:real;
 begin
 movespeed:=0.2;
-//2dvector type has attributes named X&Y but here the Y attribute represents the Z axis since we don't walk into the sky
 
-///for now just move camera, eventually it will move player and there will be two cameras, one in front of player, and one that trails player third person
-if movingforward=True then
+if SinglePlayer.movingforward=True then
 begin
-   MainCamera.X:=MainCamera.X+MainCamera.Front.X*movespeed;
-   MainCamera.Z:=MainCamera.Z+MainCamera.Front.Y*movespeed;
+   SinglePlayer.X:=SinglePlayer.X+SinglePlayer.Front.X*movespeed;
+   SinglePlayer.Z:=SinglePlayer.Z+SinglePlayer.Front.Y*movespeed;
 end
-else if movingbackward=True then begin
-   MainCamera.X:=MainCamera.X-MainCamera.Front.X*movespeed;
-   MainCamera.Z:=MainCamera.Z-MainCamera.Front.Y*movespeed;
+else if SinglePlayer.movingbackward=True then begin
+   SinglePlayer.X:=SinglePlayer.X-SinglePlayer.Front.X*movespeed;
+   SinglePlayer.Z:=SinglePlayer.Z-SinglePlayer.Front.Y*movespeed;
 end;
 
 //check for strafing, ignoring it if player is trying to strafe left and right at once
-if (leftstrafe=True) and (rightstrafe=False) then begin
-   MainCamera.X:=MainCamera.X-MainCamera.Right.X*movespeed;
-   MainCamera.Z:=MainCamera.Z-MainCamera.Right.Y*movespeed;
+if (SinglePlayer.leftstrafe=True) and (SinglePlayer.rightstrafe=False) then begin
+   SinglePlayer.X:=SinglePlayer.X-SinglePlayer.Right.X*movespeed;
+   SinglePlayer.Z:=SinglePlayer.Z-SinglePlayer.Right.Y*movespeed;
 end
-else if (rightstrafe=True) and (leftStrafe=False)then begin
-   MainCamera.X:=MainCamera.X+MainCamera.Right.X*movespeed;
-   MainCamera.Z:=MainCamera.Z+MainCamera.Right.Y*movespeed;
-end
+else if (SinglePlayer.rightstrafe=True) and (SinglePlayer.leftStrafe=False)then begin
+   SinglePlayer.X:=SinglePlayer.X+SinglePlayer.Right.X*movespeed;
+   SinglePlayer.Z:=SinglePlayer.Z+SinglePlayer.Right.Y*movespeed;
+end;
 
+if SinglePlayer.jumping and (not SinglePlayer.InAir) then begin
+   SinglePlayer.InAir:=True;
+   SinglePlayer.jumpvelocity:=1;
+end;
+
+//If player is in the air keep dropping jump velocity until player hits the ground
+if (SinglePlayer.InAir) then begin
+SinglePlayer.jumpvelocity:= SinglePlayer.jumpvelocity-0.2;
+SinglePlayer.Y:= SinglePlayer.Y+SinglePlayer.jumpvelocity;
+   end;
+//if player is on or below the ground then.
+if SinglePlayer.Y<=0 then begin
+   SinglePlayer.InAir:=False;
+   SinglePlayer.Y:=0;
+end;
+//After Updating the Player Position update the First Person Perspective Camera
+//Eventually a third person trailing camera will also be added here
+
+SinglePlayer.POV.X:=SinglePlayer.X;
+SinglePlayer.POV.Z:=SinglePlayer.Z;
+SinglePlayer.POV.Y:=SinglePlayer.Y+SinglePlayer.Height;
 
 end;
 
 procedure TForm1.FormCreate(Sender: TObject);
 begin
 IniEngine;
+IniPlayer;
+//
+
 end;
 
 procedure TForm1.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState
   );
 begin
 
-if Key=87 then movingforward:=True
-else if Key=83 then movingbackward:=True;
+if Key=87 then SinglePlayer.movingforward:=True
+else if Key=83 then SinglePlayer.movingbackward:=True;
 
-if Key=65 then leftstrafe:=True
-else if Key=68 then rightstrafe:=True;
+if Key=65 then SinglePlayer.leftstrafe:=True
+else if Key=68 then SinglePlayer.rightstrafe:=True;
+
+If Key=32 then SinglePlayer.jumping:=True;
 
 
 end;
 
 procedure TForm1.FormKeyUp(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
-  if Key=87 then movingforward:=False;
-if Key=83 then movingbackward:=False;
-if Key=65 then leftstrafe:=False;
-if Key=68 then rightstrafe:=False;
+//process movement
+if Key=87 then SinglePlayer.movingforward:=False;
+if Key=83 then SinglePlayer.movingbackward:=False;
+if Key=65 then SinglePlayer.leftstrafe:=False;
+if Key=68 then SinglePlayer.rightstrafe:=False;
+If Key=32 then SinglePlayer.jumping:=False;
+
+//process crouch
+
+
+//process jump
 
 
 end;
@@ -418,7 +473,7 @@ var
     outcol:ByteCol;
    texcol:ByteCol;
 begin
-heightdifference:=2;//Cam.Y+PlayerHeight;//How far the camera is from the Ground
+heightdifference:=SinglePlayer.Y+SinglePlayer.Height;//Cam.Y+PlayerHeight;//How far the camera is from the Ground
 if not(inclination=0) then begin
 raylength:=sqrt(sqr(heightdifference/math.tan(inclination))+sqr(heightdifference));
 YintersectX:=Cam.X+cos(Azimuth)*raylength;
@@ -433,11 +488,11 @@ result:=outcol;
 end
 else if inclination <0  then  begin
    texcol:=GrassTexture.Pixels[floor(wrap(YintersectX*250,GrassTexture.width))][floor(wrap(YintersectZ*250,GrassTexture.height))];
-   result:=BlendByteCols(texcol.R,texcol.G,texcol.B,FogR,FogG,FogB,(1-ArcTan(raylength/2)/halfpi))
+   result:=BlendByteCols(texcol.R,texcol.G,texcol.B,FogR,FogG,FogB,1-ArcTan(raylength/2)/halfpi)
 end
 else begin
 texcol:=SkyTexture.Pixels[floor(wrap(azimuth,tau)/tau*SkyTexture.width)][floor(wrap(inclination,tau)/tau*SkyTexture.height)];
-result:=BlendByteCols(texcol.R,texcol.G,texcol.B,FogR,FogG,FogB,(1-ArcTan(raylength/2)/halfpi));
+result:=BlendByteCols(texcol.R,texcol.G,texcol.B,FogR,FogG,FogB,1-ArcTan(raylength/2)/halfpi);
 end
 end;
 
@@ -449,10 +504,10 @@ end;
 procedure TForm1.Timer1Timer(Sender: TObject);
 begin
   MovePlayer;
-  MoveCamera;
-FPSLabel.caption:= inttostr(frame)+'  '+FloatToStr(MainCamera.inclination)+' , '+FloatToStr(MainCamera.azimuth)+' Direction: ('+floattostr(MainCamera.Front.X)+', '+floattostr(MainCamera.Front.Y)+')';
+  UpdateView;
+FPSLabel.caption:= inttostr(frame)+'  '+FloatToStr(SinglePlayer.POV.inclination)+' , '+FloatToStr(SinglePlayer.azimuth)+' Direction: ('+floattostr(SinglePlayer.Front.X)+', '+floattostr(SinglePlayer.Front.Y)+')';
   frame:=frame+1;
-ScanlineDraw(MainCamera);
+ScanlineDraw(SinglePlayer.POV);
 end;
 
 procedure TForm1.FormResize(Sender: TObject);
@@ -489,4 +544,3 @@ begin
 end;
 
 end.
-

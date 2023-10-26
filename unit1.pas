@@ -211,11 +211,10 @@ begin
 Mouse.CursorPos:=Point(HalfWidth+Form1.Left,HalfHeight+Form1.Top);
 end;
 
-function FogLevel(distance:real):real;
+function TForm1.FogLevel(distance:real):real;
 begin
 //This will be updated to depend on fog thickness and ambient light, for the time being fog thickness is constant depending only on the distance of the rendered point
-result:= 1-ArcTan(raylength/2)/halfpi;
-
+result:= 1-ArcTan(distance/2)/halfpi;
 end;
 
 function TForm1.BitmapToTexture(inputimage:TBitmap):Texture;
